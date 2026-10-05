@@ -90,9 +90,10 @@ export function Header() {
             type="button"
             onClick={() => cart.open()}
             className="flex h-10 items-center gap-2.5 rounded-full bg-ink-900 pr-1.5 pl-4 text-[0.875rem] text-oat-50 transition-colors hover:bg-clay-700"
-            aria-label={`Open cart, ${count} ${count === 1 ? "item" : "items"}`}
+            aria-label={`Cart, ${count} ${count === 1 ? "item" : "items"}`}
           >
-            Cart
+            {/* The space keeps the visible text "Cart 0" (flex drops it from layout), matching the name. */}
+            Cart{" "}
             <span className="tabular grid h-7 min-w-7 place-items-center rounded-full bg-oat-50 px-1.5 text-[0.75rem] text-ink-900">
               <AnimatePresence mode="popLayout" initial={false}>
                 <motion.span

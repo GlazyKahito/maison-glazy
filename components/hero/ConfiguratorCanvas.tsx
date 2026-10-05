@@ -1,7 +1,7 @@
 "use client";
 
 import * as THREE from "three";
-import { Suspense, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, useGLTF } from "@react-three/drei";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
@@ -71,11 +71,27 @@ function CameraFit({ productId, wide }: { productId: ProductId; wide: boolean })
   return null;
 }
 
-function Controls({ reducedMotion, nudgeRef }: { reducedMotion: boolean; nudgeRef: React.RefObject<number> }) {
+/** Seconds on a clock that keeps running when the render loop pauses (R3F restarts its own clock then). */
+const now = () => performance.now() / 1000;
+
+function Controls({
+  reducedMotion,
+  revealed,
+  nudgeRef,
+}: {
+  reducedMotion: boolean;
+  revealed: boolean;
+  nudgeRef: React.RefObject<number>;
+}) {
   const ref = useRef<OrbitControlsImpl>(null);
   const interacting = useRef(false);
-  const idleAt = useRef(0);
+  // Idle time counts from when the stage mounted, whether or not the loop is running.
+  const idleAt = useRef(Infinity);
   const offset = useMemo(() => new THREE.Vector3(), []);
+
+  useEffect(() => {
+    idleAt.current = now();
+  }, []);
 
   useEffect(() => {
     // Let vertical swipes scroll the page on touch screens; horizontal drags turn the piece.
@@ -93,12 +109,14 @@ function Controls({ reducedMotion, nudgeRef }: { reducedMotion: boolean; nudgeRe
       nudgeRef.current = pending - step;
       offset.copy(c.object.position).sub(c.target).applyAxisAngle(UP, step);
       c.object.position.copy(c.target).add(offset);
-      idleAt.current = state.clock.elapsedTime;
+      idleAt.current = now();
       state.invalidate();
     }
-    if (interacting.current) idleAt.current = state.clock.elapsedTime;
-    const idle = state.clock.elapsedTime - idleAt.current > 2.5;
-    c.autoRotate = !reducedMotion && idle;
+    if (interacting.current) idleAt.current = now();
+    const idle = now() - idleAt.current > 2.5;
+    // Auto-turn only once the curtain is open: each turn asks for the next frame, which would
+    // keep the on-demand loop running (and drift the camera) unseen behind the curtain.
+    c.autoRotate = !reducedMotion && revealed && idle;
     // three's auto-rotate is per frame; convert to a steady 0.16 rad/s whatever the refresh rate.
     c.autoRotateSpeed = (0.16 * Math.min(delta, 0.05) * 3600) / (2 * Math.PI);
   });
@@ -123,6 +141,101 @@ function Controls({ reducedMotion, nudgeRef }: { reducedMotion: boolean; nudgeRe
       }}
     />
   );
+}
+
+/** The parts of three's PMREMGenerator needed to compile its filter shaders ahead of time. */
+type FilterInternals = {
+  _setSize?: (cubeSize: number) => void;
+  _allocateTargets?: () => THREE.WebGLRenderTarget;
+  _ggxMaterial?: THREE.Material | null;
+  _blurMaterial?: THREE.Material | null;
+  _cubemapMaterial?: THREE.Material | null;
+};
+
+const warmedEnvironments = new WeakSet<THREE.Texture>();
+
+/**
+ * The first physical material to meet the light-panel environment makes three pre-filter it
+ * (PMREM) with a heavy GGX shader that is compiled on the spot and blocks for about a second.
+ * Compiling an identical filter in parallel first lets that conversion find its shaders ready.
+ * It leans on three internals, so it is guarded: if they change, it does nothing and the
+ * conversion simply compiles as before. Returns a function that frees the warm-up resources.
+ */
+async function warmEnvironmentFilter(gl: THREE.WebGLRenderer, environment: THREE.Texture | null) {
+  const faces = environment?.image as { width?: number }[] | undefined;
+  if (!environment || warmedEnvironments.has(environment) || !Array.isArray(faces)) return () => {};
+
+  const pmrem = new THREE.PMREMGenerator(gl);
+  const internals = pmrem as unknown as FilterInternals;
+  if (typeof internals._setSize !== "function" || typeof internals._allocateTargets !== "function") {
+    pmrem.dispose();
+    return () => {};
+  }
+  warmedEnvironments.add(environment);
+
+  // Same cube size as the real conversion, so the shader defines (and the cached programs) match.
+  internals._setSize(faces[0]?.width || 16);
+  const target = internals._allocateTargets();
+  // The filter renders into a linear half-float target: compile for that, not for the screen.
+  const previous = gl.getRenderTarget();
+  gl.setRenderTarget(target);
+  pmrem.compileCubemapShader();
+  // The filter's planes carry positions and no normals, which is part of the program's cache key.
+  const planes = new THREE.BufferGeometry();
+  planes.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3));
+  const filters = new THREE.Scene();
+  for (const material of [internals._ggxMaterial, internals._blurMaterial, internals._cubemapMaterial]) {
+    if (material) filters.add(new THREE.Mesh(planes, material));
+  }
+  const ready = gl.compileAsync(filters, new THREE.OrthographicCamera());
+  gl.setRenderTarget(previous);
+  await ready;
+
+  return () => {
+    planes.dispose();
+    target.dispose();
+    pmrem.dispose();
+  };
+}
+
+/**
+ * Compiles every shader the piece needs before its first frame, off the main thread.
+ * The velvet is a physical material with sheen: compiled on first draw it froze the
+ * page for seconds (notably on Windows), stalling the opening counter.
+ * It sits inside the model's Suspense boundary, so it runs once the piece is in the scene.
+ */
+function Precompile({ onDone }: { onDone: () => void }) {
+  const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
+
+  useEffect(() => {
+    let alive = true;
+    const done = () => {
+      if (alive) onDone();
+    };
+
+    // Without parallel compilation there is nothing to gain: draw straight away.
+    if (!gl.extensions.has("KHR_parallel_shader_compile")) {
+      done();
+      return;
+    }
+
+    const run = async () => {
+      const release = await warmEnvironmentFilter(gl, scene.environment).catch(() => () => {});
+      try {
+        await gl.compileAsync(scene, camera);
+      } finally {
+        release();
+      }
+    };
+    run().then(done, done);
+    return () => {
+      alive = false;
+    };
+  }, [gl, scene, camera, onDone]);
+
+  return null;
 }
 
 /** Reports the first frame that actually contains the model. */
@@ -170,10 +283,17 @@ export default function ConfiguratorCanvas(props: Props) {
     return () => window.clearTimeout(id);
   }, [revealed, productId]);
 
+  // Nothing is drawn until the piece's shaders are ready, so no frame waits on a compile.
+  const [compiled, setCompiled] = useState<ProductId | null>(null);
+  const onCompiled = useCallback(() => setCompiled(productId), [productId]);
+  const running = active && compiled === productId;
+  // While the curtain is closed nobody sees the stage: draw only the frames the scene asks for.
+  const frameloop = !running ? "never" : reducedMotion || !revealed ? "demand" : "always";
+
   return (
     <Canvas
       dpr={[1, 1.75]}
-      frameloop={active ? (reducedMotion ? "demand" : "always") : "never"}
+      frameloop={frameloop}
       camera={{ fov: CAMERA.fov, near: 0.1, far: 40, position: cameraStartPosition() }}
       gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
       onCreated={({ gl }) => {
@@ -193,9 +313,10 @@ export default function ConfiguratorCanvas(props: Props) {
           revealed={revealed}
           reducedMotion={reducedMotion}
         />
+        <Precompile key={`pc-${productId}`} onDone={onCompiled} />
         <FirstFrame key={`ff-${productId}`} onFirstFrame={onFirstFrame} />
       </Suspense>
-      <Controls reducedMotion={reducedMotion} nudgeRef={nudgeRef} />
+      <Controls reducedMotion={reducedMotion} revealed={revealed} nudgeRef={nudgeRef} />
       <CameraFit productId={productId} wide={wide} />
     </Canvas>
   );
