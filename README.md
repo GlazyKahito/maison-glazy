@@ -7,7 +7,7 @@ A store for a fictional furniture atelier between Copenhagen and Mumbai, with a 
 ## Technically interesting
 
 - **3D configurator** in React Three Fiber and drei. Turn the Ilse chair or the Sora sofa, and five velvets and three finishes tween live on the model's sheen material. Drag it, or use the arrow keys when the viewer has focus; it turns on its own when idle.
-- **No first-frame freeze.** The velvet's physical shader is compiled in parallel with `compileAsync` before the first frame, and the chair model is preloaded from the document head.
+- **No first-frame freeze.** The velvet's physical shader, and the environment pre-filter it triggers, compile in parallel with `compileAsync` before the first frame.
 - **Opening sequence driven by real loading** (fonts, model bytes, first rendered frame). A line drawing of the chair draws itself, then the curtain parts. Behind the closed curtain the scene renders only on demand. It plays once per session, `Esc` skips it, and it stays still under reduced motion.
 - **Studio lighting without an HDR download.** Light panels generate the environment, the key and rim lights follow the camera, and ground shadows are baked from each model's geometry.
 - **Every product photo is a render of the same scene**, including four pieces modelled in code.

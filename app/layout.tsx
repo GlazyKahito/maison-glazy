@@ -1,8 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Cormorant_Garamond, Instrument_Sans } from "next/font/google";
-import { preload } from "react-dom";
 import { Providers } from "@/components/Providers";
-import { PRODUCTS } from "@/lib/catalog";
 import "./globals.css";
 
 const display = Cormorant_Garamond({
@@ -60,10 +58,6 @@ export const viewport: Viewport = {
 const introScript = `(function(){var d=document.documentElement;try{var seen=sessionStorage.getItem("maison-intro");d.dataset.intro=(seen||location.hash)?"off":"on";}catch(e){d.dataset.intro="off";}})();`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
-  // The hero chair is the long pole of the opening: start it with the HTML instead of after hydration.
-  // crossOrigin matches the credentials of fetch() and three's loader, so both reuse this response.
-  preload(PRODUCTS.ilse.model, { as: "fetch", crossOrigin: "anonymous" });
-
   return (
     <html lang="en-IN" className={`${display.variable} ${body.variable}`} suppressHydrationWarning>
       <head>
